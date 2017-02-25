@@ -17,7 +17,7 @@ does not overlap, or by fixing the position of nodes ahead of time.
 This is a complicated optimization problem, and placement in practice is a
 difficult and time consuming step of hardware development.
 
-This project proposes to use methods from convext optimization to solve large
+This project proposes to use methods from convex optimization to solve large
 placement problems quickly.
 I plan to approximate the placement problem as convex problem (including
 constraints) over real valued placements and then use
@@ -32,8 +32,8 @@ I envision two major deliverables
     - A program that can take in some form of netlist and produce a placement.
     - A comparison between my solution and some other solution (i.e. simulated annealing)
 
-Note that the final solution is not intended to be compeative with cutting
-edge research or commertial products.
+Note that the final solution is not intended to be competitive with cutting
+edge research or commercial products.
 My goal is to (hopefully) show that branch and bound + convex optimization is a
 promising direction for future research on placement problems.
 
@@ -46,7 +46,7 @@ For example, approximating the total wire length as the sum of the bounding box
 around cliques of gates in the netlist is convex and fairly close to the
 [actual wire length in practice](http://dl.acm.org/citation.cfm?id=1112348).
 For this project I plan on optimizing using the convex approximations, and thus
-the quality of the placement depends on how good thse approximations are.
+the quality of the placement depends on how good these approximations are.
 
 Additionally, it's not clear how fast branch and bound will be for this particular
 problem, even if it may be fast for other problems.
@@ -54,7 +54,7 @@ problem, even if it may be fast for other problems.
 Previous Work
 ---
 The ideas here draw heavily from work on using quadratic programming for
-pacement, which uses a quadratic approximation for wire lengths.
+placement, which uses a quadratic approximation for wire lengths.
 See [slides 29-49](http://vlsicad.eecs.umich.edu/KLMH/downloads/book/chapter4/chap4-111206.pdf)
 for examples.
 
@@ -72,7 +72,7 @@ Major results
 
 Timeline
 ---
-    - (2/27) Install CVXPy and familierize myself with it (I've only used CVX before)
+    - (2/27) Install CVXPy and familiarize myself with it (I've only used CVX before)
     - (3/1) Get small hard coded non branch-and-bound example working.
     - (3/7) Be able to read and solve non branch-and-bound examples from a file.
     - (3/14) Finish branch and bound
