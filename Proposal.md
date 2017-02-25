@@ -28,9 +28,10 @@ very fast even with a large number of constraints and variables.
 
 Deliverables
 ---
-I envision two major deliverables
-    - A program that can take in some form of netlist and produce a placement.
-    - A comparison between my solution and some other solution (i.e. simulated annealing)
+I envision two major deliverables:
+
+- A program that can take in some form of netlist and produce a placement.
+- A comparison between my solution and some other solution (i.e. simulated annealing)
 
 Note that the final solution is not intended to be competitive with cutting
 edge research or commercial products.
@@ -65,16 +66,18 @@ to do the actual optimization.
 
 Major results
 ---
-	- Solve a small hard coded example without branch and bound
-	- Solve a non-hard coded example without branch and bound
-	- Solve using branch and bound
-    - Compare timing/results with other methods (SMT or simulated annealing)
+
+- Solve a small hard coded example without branch and bound.
+- Solve a non-hard coded example without branch and bound.
+- Solve using branch and bound.
+- Compare timing/results with other methods (SMT or simulated annealing).
 
 Timeline
 ---
-    - (2/27) Install CVXPy and familiarize myself with it (I've only used CVX before)
-    - (3/1) Get small hard coded non branch-and-bound example working.
-    - (3/7) Be able to read and solve non branch-and-bound examples from a file.
-    - (3/14) Finish branch and bound
-    - (3/20) Finish comparison with simulated annealing, other methods
-    - (3/21) Finish paper/presentation
+
+- (2/27) Install CVXPy and familiarize myself with it (I've only used CVX before)
+- (3/1) Get small hard coded non branch-and-bound example working.
+- (3/7) Be able to read and solve non branch-and-bound examples from a file.
+- (3/14) Finish branch and bound.
+- (3/20) Finish comparisons.
+- (3/21) Finish paper/presentation.
