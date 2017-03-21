@@ -15,6 +15,8 @@ from   hypergraph.convert.nx import networkx_export
 
 import networkx
 
+from scipy.stats import rankdata
+
 
 def _bbox_default(bbox=None):
     # Default to placing on 11x11 area
@@ -78,7 +80,9 @@ def random_constraints(graph, bbox=None, n_constraints=4, seed=None):
 
     return fixed_placement
 
-def convex_overlap_constraints(graph, x, y):
+def convex_overlap_constraints(graph, x, y, bbox=None, fixed_placement={}):
+    bbox = _bbox_default(bbox)
+
     # Non-overlap constraints
     z = cvx.Int(len(graph.vertices), 4 * len(graph.vertices))
     overlap_constraints = [1 >= z, z >= 0]
@@ -88,29 +92,44 @@ def convex_overlap_constraints(graph, x, y):
             if a == b:
                 continue
 
+            # if a and b are fixed, we don't need any more constraints
+            if a in fixed_placement.keys() and b in fixed_placement.keys():
+                print("skipping {} and {}".format(a, b))
+                continue
+
             # Here, there are 4 possibilities between each node A and B
             #
-            # 1) A left  of B => x[B] - x[A] + M * z[A, 4 * B + 0] >= 1
-            # 2) A right of B => x[A] - x[B] + M * z[A, 4 * B + 1] >= 1
-            # 4) A below    B => y[B] - y[A] + M * z[A, 4 * B + 2] >= 1
-            # 3) A above    B => y[A] - y[B] + M * z[A, 4 * B + 3] >= 1
+            # 1) A left  of B => x[B] - x[A] + M * z'[A, 4 * B + 0] >= 1
+            # 2) A right of B => x[A] - x[B] + M * z'[A, 4 * B + 1] >= 1
+            # 4) A below    B => y[B] - y[A] + M * z'[A, 4 * B + 2] >= 1
+            # 3) A above    B => y[A] - y[B] + M * z'[A, 4 * B + 3] >= 1
             #
             # Where M and N are values big enough to make the constraint
             # non-active when z is 1.
             overlap_constraints.extend(
-                 [x[b] - x[a] + (bbox[0] + 1) * z[a, 4 * b + 0] >= 1,
-                  x[a] - x[b] + (bbox[0] + 1) * z[a, 4 * b + 1] >= 1,
-                  y[b] - y[a] + (bbox[1] + 1) * z[a, 4 * b + 2] >= 1,
-                  y[a] - y[b] + (bbox[1] + 1) * z[a, 4 * b + 3] >= 1])
+                 [x[b] - x[a] + (bbox[0] + 1) * (1 - z[a, 4 * b + 0]) >= 1,
+                  x[a] - x[b] + (bbox[0] + 1) * (1 - z[a, 4 * b + 1]) >= 1])
+                  # y[b] - y[a] + (bbox[1] + 1) * (1 - z[a, 4 * b + 2]) >= 1,
+                  # y[a] - y[b] + (bbox[1] + 1) * (1 - z[a, 4 * b + 3]) >= 1])
+
+            print("x[{0}] - x[{1}] + {2} * (1 - z[{1}, {3}]) >= 1".format(
+                b, a, bbox[0] + 1, 4 * b + 0))
+            print("x[{1}] - x[{0}] + {2} * (1 - z[{1}, {3}]) >= 1".format(
+                b, a, bbox[0] + 1, 4 * b + 1))
 
             # Note that z is zero for the active constraint and one otherwise.
             # i.e. only one of z[A, 4 * B + 0,1,2,3] may be active (zero).
             # To force this, we require that the sum is equal to one and that Z is a bool
             overlap_constraints.extend(
                 [z[a, 4 * b + 0] +
-                 z[a, 4 * b + 1] +
-                 z[a, 4 * b + 2] +
-                 z[a, 4 * b + 3] == 3])
+                 z[a, 4 * b + 1] == 1])
+
+            print("z[{0}, {1}] + z[{0}, {2}] == 1".format(a, 4 * b + 0, 4 * b + 1))
+            # overlap_constraints.extend(
+            #     [z[a, 4 * b + 0] +
+            #      z[a, 4 * b + 1] +
+            #      z[a, 4 * b + 2] +
+            #      z[a, 4 * b + 3] == 1])
 
     return z, overlap_constraints
 
@@ -133,14 +152,21 @@ def convex_placement_problem(graph, bbox=None, fixed_placement={}):
     # Split the x and y costs since they can be optimized seperately
     xcost = 0
     ycost = 0
+    cost = 0
     for i, edge in enumerate(graph.edges):
         # Convert the edge to a list of indices that correspond to the vertices
         # connected by the edge
         vs = list(edge)
 
         # Compute the HPWL cost for this edge
-        xcost += w[i] * (cvx.max_entries(x[vs]) - cvx.min_entries(x[vs]))
-        ycost += w[i] * (cvx.max_entries(y[vs]) - cvx.min_entries(y[vs]))
+        xcost += w[i] * cvx.max_entries(cvx.max_entries(x[vs]) - cvx.min_entries(x[vs]), 1)
+        ycost += w[i] * cvx.max_entries(cvx.max_entries(y[vs]) - cvx.min_entries(y[vs]), 1)
+
+        # head = edge.head
+        # for v in edge.tail:
+        #     cost += w[i] * cvx.norm2(cvx.hstack(x[head], y[head]) - cvx.hstack(x[v], y[v])) ** 2
+
+    cost = xcost + ycost
 
     # Constrain the coords to the specified bounding box
     bbox_constraints_x = [bbox[0] >= x, x >= 0]
@@ -152,11 +178,16 @@ def convex_placement_problem(graph, bbox=None, fixed_placement={}):
     fixed_constraints_y = [y[v] == pos[1]
             for (v, pos) in fixed_placement.viewitems()]
 
-    problem = cvx.Problem(cvx.Minimize(xcost + ycost),
-            bbox_constraints_x + fixed_constraints_x
-            + bbox_constraints_y + fixed_constraints_y)
+    # Overlap constraints
+    # z, overlap_constraints = convex_overlap_constraints(graph, x, y, bbox, fixed_placement)
+    z = None; overlap_constraints = []
 
-    return w, x, y, problem
+    problem = cvx.Problem(cvx.Minimize(cost),
+            bbox_constraints_x + fixed_constraints_x
+            + bbox_constraints_y + fixed_constraints_y
+            + overlap_constraints)
+
+    return w, x, y, z, problem
 
 def convex_placement(graph, bbox=None, fixed_placement={}):
     """Place the graph using a convex optimization approach.
@@ -167,12 +198,20 @@ def convex_placement(graph, bbox=None, fixed_placement={}):
     """
 
     # Construct the problem
-    w, x, y, problem = (
-            convex_placement_problem(graph, bbox, fixed_placement))
+    w, x, y, z, problem = (
+        convex_placement_problem(graph, bbox, fixed_placement))
 
-    # Just solve the default problem since we don't really care about changing
-    # anything
-    problem.solve()
+    # First, solve the default problem
+    if problem.solve() == float('inf'):
+        raise Exception("Could not solve problem!")
+
+    # Now, get the relative x and y positioning of all nodes
+    # rel_x = rankdata(np.round(x.value), method='dense')
+    # rel_y = rankdata(np.round(y.value), method='dense')
+
+    # Create a new problem with these relative positioning constraints
+    # w, x, y, problem = (
+    #     convex_placement_problem(graph, bbox, fixed_placement, relative_placement))
 
     # Convert the x and y postition vectors into a placement
     placement = np.hstack((np.array(x.value), np.array(y.value)))
@@ -204,13 +243,27 @@ def legalize_fast(bbox, placement):
     positions = set()
 
     # Place each node
+    placement = np.round(placement)
     for i, pos in enumerate(placement):
         # Round the placement to an integer
         pos = np.round(pos)
 
-        for offset in [[0, 0], [0, 1], [0, -1], [1, 0], [-1, 0]]:
+        def offset_generator():
+            yield [0, 0]
+            for r in range(1, 10):
+                yield [ r,  0]
+                yield [-r,  0]
+                yield [ 0,  r]
+                yield [ 0, -r]
+                yield [ r,  r]
+                yield [-r,  r]
+                yield [-r, -r]
+                yield [ r, -r]
+
+        for offset in offset_generator():
             # Not a great way to do this...
-            if not ((pos + offset) == placement[i+1:, :]).all(axis=1).any():
+            compare_to = np.vstack((placement[:i, :], placement[i+1:, :]))
+            if not ((pos + offset) == compare_to).all(axis=1).any():
                 pos += offset
                 break
         else:
@@ -259,7 +312,7 @@ def main(args=None):
     bbox = [10, 10]
 
     # Create a new graph
-    graph = random_circuit(50, seed=seed)
+    graph = random_circuit(30, seed=seed)
 
     # Randomly constrain some of the nodes
     fixed = random_constraints(graph, bbox=bbox, n_constraints=4)
@@ -267,19 +320,23 @@ def main(args=None):
     # Random placement
     rand_pos = random_placement(graph, bbox=bbox, fixed_placement=fixed, seed=seed)
 
-    # Legalize
-    legal_rand_pos = legalize_fast(bbox, rand_pos)
-
     # Placement using convex optimization
     conv_pos = convex_placement(graph, bbox=bbox, fixed_placement=fixed)
+
+    # Legalize
+    _, legal_rand_pos = legalize_fast(bbox, rand_pos)
+    _, legal_conv_pos = legalize_fast(bbox, conv_pos)
+
+    print(rand_pos)
+    print(conv_pos)
 
     # Greedy Placement?
     # Geometric Placement?
 
     # Plot
     f, axarr = plt.subplots(2, sharex=True, sharey=True)
-    plot_placement(graph, rand_pos, 'Random', bbox=bbox, fixed_placement=fixed, ax=axarr[0])
-    plot_placement(graph, conv_pos, 'Convex', bbox=bbox, fixed_placement=fixed, ax=axarr[1])
+    plot_placement(graph, legal_rand_pos, 'Random', bbox=bbox, fixed_placement=fixed, ax=axarr[0])
+    plot_placement(graph, legal_conv_pos, 'Convex', bbox=bbox, fixed_placement=fixed, ax=axarr[1])
     f.show()
 
 
