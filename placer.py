@@ -22,12 +22,12 @@ def _bbox_default(bbox=None):
     # Default to placing on 11x11 area
     return np.array([10, 10]) if bbox is None else bbox
 
-def random_circuit(n_vertices=100, seed=None):
+def random_circuit(n_vertices=100, seed=None, directed=True):
     rand = np.random.RandomState(seed)
 
     # Create the graph
     vertices = np.arange(n_vertices)
-    graph = Graph(vertices=vertices, directed=True)
+    graph = Graph(vertices=vertices, directed=directed)
 
     # Starting from the root vertex, create a random "circuit like" graph
     for i, v in enumerate(vertices):
@@ -38,30 +38,39 @@ def random_circuit(n_vertices=100, seed=None):
             sample = rand.choice(vertices[:i], 2)
 
         # Add the edge to the graph
-        edge = Edge(np.hstack([v, sample]), head=v)
+        edge = Edge(np.hstack([v, sample]), head=v if directed else None)
         graph.add_edge(edge)
 
     return graph
 
-def random_placement(graph, bbox=None, fixed_placement={}, seed=None):
+def random_placement(graph, bbox=None, fixed_placement={}, seed=None, best_of=1):
     bbox = _bbox_default(bbox)
     rand = np.random.RandomState(seed)
 
-    # The placement is a matrix with rows representing x, y of node
-    placement = rand.random_sample((len(graph.vertices), 2)) * bbox
+    cost = float('inf')
+    placement = None
+    for _ in range(best_of):
+        # The placement is a matrix with rows representing x, y of node
+        new_placement = rand.random_sample((len(graph.vertices), 2)) * bbox
 
-    # Fix the positions for the fixed nodes
-    for v, pos in fixed_placement.viewitems():
-        placement[v] = pos
+        # Fix the positions for the fixed nodes
+        for v, pos in fixed_placement.viewitems():
+            new_placement[v] = pos
+
+        # check if we want to switch
+        new_cost = cost_HPWL(graph, new_placement)
+        if new_cost < cost:
+            cost = new_cost
+            placement = new_placement
 
     return placement
 
-def random_constraints(graph, bbox=None, n_constraints=4, seed=None):
+def random_fixed(graph, bbox=None, n_fixed=4, seed=None):
     """Randomly create a fixed placement for some nodes in the graph"""
     bbox = _bbox_default(bbox)
     rand = np.random.RandomState(seed)
 
-    assert n_constraints >= 2, "Number of constraints must be >= 2"
+    assert n_fixed >= 2, "Number of fixed nodes must be >= 2"
 
     # Number of nodes to choose from
     N = len(graph.vertices) - 1
@@ -70,7 +79,7 @@ def random_constraints(graph, bbox=None, n_constraints=4, seed=None):
     fixed_placement = {}
 
     # Pick a couple nodes from the center and fix them
-    for _ in range(n_constraints - 2):
+    for _ in range(n_fixed - 2):
         fixed_placement[rand.randint(1, N)] = (
                 [rand.randint(0, bbox[0] + 1), rand.randint(0, bbox[1] + 1)])
 
@@ -133,7 +142,7 @@ def convex_overlap_constraints(graph, x, y, bbox=None, fixed_placement={}):
 
     return z, overlap_constraints
 
-def convex_placement_problem(graph, bbox=None, fixed_placement={}):
+def convex_placement_problem(graph, bbox=None, fixed_placement={}, ranks=None):
     """Construct a convex problem for the given graph"""
     bbox = _bbox_default(bbox)
 
@@ -159,8 +168,8 @@ def convex_placement_problem(graph, bbox=None, fixed_placement={}):
         vs = list(edge)
 
         # Compute the HPWL cost for this edge
-        xcost += w[i] * cvx.max_entries(cvx.max_entries(x[vs]) - cvx.min_entries(x[vs]), 1)
-        ycost += w[i] * cvx.max_entries(cvx.max_entries(y[vs]) - cvx.min_entries(y[vs]), 1)
+        xcost += w[i] * cvx.max_entries(x[vs]) - cvx.min_entries(x[vs])
+        ycost += w[i] * cvx.max_entries(y[vs]) - cvx.min_entries(y[vs])
 
         # head = edge.head
         # for v in edge.tail:
@@ -181,6 +190,12 @@ def convex_placement_problem(graph, bbox=None, fixed_placement={}):
     # Overlap constraints
     # z, overlap_constraints = convex_overlap_constraints(graph, x, y, bbox, fixed_placement)
     z = None; overlap_constraints = []
+    if ranks is not None:
+        for x_rank, x_rank_next in zip(ranks[0:], ranks[:-1]):
+            overlap_constraints += [x[x_rank] <= x[x_rank_next]]
+
+        for y_rank, y_rank_next in zip(ranks[0:], ranks[:-1]):
+            overlap_constraints += [y[y_rank] <= y[y_rank_next]]
 
     problem = cvx.Problem(cvx.Minimize(cost),
             bbox_constraints_x + fixed_constraints_x
@@ -189,7 +204,116 @@ def convex_placement_problem(graph, bbox=None, fixed_placement={}):
 
     return w, x, y, z, problem
 
-def convex_placement(graph, bbox=None, fixed_placement={}):
+def heruistic_initializer(graph, fixed_placement={}):
+    # Convert the graph to a networkx graph since hypergraph is shitty for this
+    nx = networkx_export(graph)
+
+    # Make it undirected
+    nx = nx.to_undirected()
+
+    # change the weights to be 1/w
+    for _, _, d in nx.edges_iter(data=True):
+        d['weight'] = 1 / d['weight']
+
+    # Add edges between the fixed nodes
+    for h in fixed_placement.keys():
+        for t in fixed_placement.keys():
+            if h != t:
+                nx.add_edge(h, t, weight=np.sum(np.abs(
+                    np.array(fixed_placement[h]) - np.array(fixed_placement[t]))))
+
+    # Find the path lenght between all pairs
+    paths = networkx.all_pairs_dijkstra_path_length(nx, weight='weight')
+
+    # Convert the paths into a matrix of distances
+    N = len(graph.vertices)
+    dists = np.array([v for row in paths.values() for v in row.values()]).reshape(N, N)
+
+    # Do least squares
+    x = np.zeros(N)
+    y = np.zeros(N)
+    for n in range(N):
+        A = 2 * np.array([[fixed_placement[0][0] - pos[0], fixed_placement[0][1] - pos[1]]
+            for pos in fixed_placement.values()])[1:]
+        b = np.array([pos[0] ** 2 + pos[1] ** 2
+            - fixed_placement[0][0] ** 2 - fixed_placement[0][1] ** 2
+            + dists[n][0] ** 2 - dists[n][v] ** 2
+            for v, pos in fixed_placement.items()])[1:]
+
+        (x[n], y[n]), _, _, _ = np.linalg.lstsq(A, b)
+
+    # Round to the nearest 1
+    x = np.round(x)
+    y = np.round(y)
+
+    # Rank in the x and y direction
+    # Breaks ties randomly
+    rank_x = argsort(x)
+    rank_y = argsort(y)
+
+    return x, y
+
+def simulated_anneal_convex(graph, bbox=None, fixed_placement={}, initial_ranks=None):
+    if initial_ranks is None:
+        initial_ranks = np.vstack(heruistic_initializer(graph, fixed_placement))
+
+    # Constant temp
+    t = 1
+
+    non_fixed = [v for v in graph.vertices if v not in fixed_placement.keys()]
+    ranks = np.copy(initial_ranks)
+    sample_cost = float('inf')
+    placement = None
+    for _ in range(1000):
+        # randomly select two nodes
+        n1 = np.random.choice(non_fixed)
+        n2 = np.random.choice(non_fixed)
+
+        # Select a direction
+        d = np.random.randint(2)
+
+        # Swap
+        ranks[d][n1], ranks[d][n2] = ranks[d][n2], ranks[d][n1]
+
+        # Solve
+        sample_placement = convex_placement(graph, bbox, fixed_placement, ranks)
+
+        # Check the cost of the placement
+        sample_cost = cost_HPWL(graph, placement)
+
+        # accept?
+        if np.random.rand() < min(1, sample_cost / cost):
+            cost = sample_cost
+            placement = sample_placement
+
+    return placement
+
+def simulated_anneal(graph, bbox=None, fixed_placement={}, seed=None):
+    # Constant temp
+    t = 0.1
+
+    non_fixed = [v for v in graph.vertices if v not in fixed_placement.keys()]
+    placement = random_placement(graph, bbox=bbox, fixed_placement=fixed_placement, best_of=10)
+    cost = cost_HPWL(graph, placement)
+    for _ in range(1000):
+        # Select a random node
+        n = np.random.choice(non_fixed)
+
+        # Generate a new graph with everthing but this node fixed
+        fixed = dict(zip(np.arange(len(placement)), placement))
+        fixed.pop(n)
+
+        sample_placement = random_placement(graph, bbox=bbox, fixed_placement=fixed)
+
+        # Accept?
+        sample_cost = cost_HPWL(graph, placement)
+        if np.random.rand() < min(1, sample_cost / cost):
+            cost = sample_cost
+            placement = sample_placement
+
+    return placement
+
+def convex_placement(graph, bbox=None, fixed_placement={}, ranks=None):
     """Place the graph using a convex optimization approach.
     :graph: Hypergraph that gives the nodes to be placed.
     :bbox: [x, y] of upper right corner of bounding box for placed nodes.
@@ -199,19 +323,11 @@ def convex_placement(graph, bbox=None, fixed_placement={}):
 
     # Construct the problem
     w, x, y, z, problem = (
-        convex_placement_problem(graph, bbox, fixed_placement))
+        convex_placement_problem(graph, bbox, fixed_placement, ranks))
 
     # First, solve the default problem
     if problem.solve() == float('inf'):
         raise Exception("Could not solve problem!")
-
-    # Now, get the relative x and y positioning of all nodes
-    # rel_x = rankdata(np.round(x.value), method='dense')
-    # rel_y = rankdata(np.round(y.value), method='dense')
-
-    # Create a new problem with these relative positioning constraints
-    # w, x, y, problem = (
-    #     convex_placement_problem(graph, bbox, fixed_placement, relative_placement))
 
     # Convert the x and y postition vectors into a placement
     placement = np.hstack((np.array(x.value), np.array(y.value)))
@@ -237,34 +353,35 @@ def cost_HPWL(graph, placement):
 
     return cost
 
+def offset_generator(r):
+    """Produce concentric offsets up to radius r"""
+    yield [0, 0]
+    for r in range(1, r+1):
+        for x in range(-r, r+1):
+            yield [x, r]
+        for y in range(r-1, -r-1, -1):
+            yield [r, y]
+        for x in range(r-1, -r-1, -1):
+            yield [x, -r]
+        for y in range(-r, r+1):
+            yield [-r, y]
+
 def legalize_fast(bbox, placement):
     """Attempt to legalize the graph through clamping"""
-    # Set of positions that have a node in them
-    positions = set()
-
     # Place each node
     placement = np.round(placement)
     for i, pos in enumerate(placement):
         # Round the placement to an integer
         pos = np.round(pos)
 
-        def offset_generator():
-            yield [0, 0]
-            for r in range(1, 10):
-                yield [ r,  0]
-                yield [-r,  0]
-                yield [ 0,  r]
-                yield [ 0, -r]
-                yield [ r,  r]
-                yield [-r,  r]
-                yield [-r, -r]
-                yield [ r, -r]
-
-        for offset in offset_generator():
-            # Not a great way to do this...
+        # Not a great way to do this...
+        for offset in offset_generator(np.max(bbox)):
             compare_to = np.vstack((placement[:i, :], placement[i+1:, :]))
-            if not ((pos + offset) == compare_to).all(axis=1).any():
-                pos += offset
+            new_pos = pos + offset
+            if (not (new_pos == compare_to).all(axis=1).any()
+                    and bbox[0] >= new_pos[0] >= 0
+                    and bbox[1] >= new_pos[1] >= 0):
+                pos = new_pos
                 break
         else:
             raise Exception("Could not legalize placement")
@@ -272,7 +389,27 @@ def legalize_fast(bbox, placement):
         # update the placement
         placement[i] = pos
 
-    return True, placement
+    return placement
+
+def distribution():
+    seed = 0
+    bbox = [10, 10]
+
+    rand_costs = []
+    conv_costs = []
+    for _ in range(100):
+        graph = random_circuit(30, seed=seed)
+        fixed = random_fixed(graph, bbox=bbox, n_fixed=4)
+        rand_pos = simulated_anneal(graph, bbox=bbox, fixed_placement=fixed, seed=seed)
+        conv_pos = simulated_anneal_convex(graph, bbox=bbox, fixed_placement=fixed)
+
+        legal_rand_pos = legalize_fast(bbox, rand_pos)
+        legal_conv_pos = legalize_fast(bbox, conv_pos)
+
+        rand_costs += [cost_HPWL(graph, legal_rand_pos)]
+        conv_costs += [cost_HPWL(graph, legal_conv_pos)]
+
+    return rand_costs, conv_costs
 
 def plot_placement(graph, placement, title=None, bbox=None, fixed_placement={}, ax=None):
     bbox = _bbox_default(bbox)
@@ -315,30 +452,26 @@ def main(args=None):
     graph = random_circuit(30, seed=seed)
 
     # Randomly constrain some of the nodes
-    fixed = random_constraints(graph, bbox=bbox, n_constraints=4)
+    fixed = random_fixed(graph, bbox=bbox, n_fixed=4)
 
-    # Random placement
-    rand_pos = random_placement(graph, bbox=bbox, fixed_placement=fixed, seed=seed)
+    # Simulated annealed placement
+    rand_pos = simulated_anneal(graph, bbox=bbox, fixed_placement=fixed, seed=seed)
 
     # Placement using convex optimization
-    conv_pos = convex_placement(graph, bbox=bbox, fixed_placement=fixed)
+    conv_pos = simulated_anneal_convex(graph, bbox=bbox, fixed_placement=fixed)
 
     # Legalize
-    _, legal_rand_pos = legalize_fast(bbox, rand_pos)
-    _, legal_conv_pos = legalize_fast(bbox, conv_pos)
+    legal_rand_pos = legalize_fast(bbox, rand_pos)
+    legal_conv_pos = legalize_fast(bbox, conv_pos)
 
     print(rand_pos)
     print(conv_pos)
-
-    # Greedy Placement?
-    # Geometric Placement?
 
     # Plot
     f, axarr = plt.subplots(2, sharex=True, sharey=True)
     plot_placement(graph, legal_rand_pos, 'Random', bbox=bbox, fixed_placement=fixed, ax=axarr[0])
     plot_placement(graph, legal_conv_pos, 'Convex', bbox=bbox, fixed_placement=fixed, ax=axarr[1])
     f.show()
-
 
 if __name__ == '__main__':
     main(sys.argv[1:])
